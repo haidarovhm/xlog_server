@@ -1,43 +1,96 @@
 package main
 
-import(
-	"fmt"
-	"os"
+import (
+	"io"
 	"log"
+	"net"
+	"os"
 )
 
-type xlog struct {
-	file *os.File
+type req struct {
+	data []byte
+	resp chan bool
 }
 
-func newXlog(path string) (*xlog, error) {
+type logger struct {
+	file *os.File
+	reqs chan *req
+}
+
+func newLogger(path string) (*logger, error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
-	log := &xlog{
+	return &logger{
 		file: file,
-	}
-	return log, nil
+		reqs: make(chan *req),
+	}, nil
 }
 
-func (log *xlog) log(data []byte) error {
-	_, err := log.file.Write(data)
+func (lgr *logger) log(data []byte) error {
+	_, err := lgr.file.Write(data)
 	return err
 }
 
+func (lgr *logger) run() {
+	for req := range lgr.reqs {
+		err := lgr.log(req.data)
+		if err != nil {
+			log.Println("failed to log block")
+		}
+		req.resp <- err == nil
+	}
+}
+
+func handleClient(conn net.Conn, reqs chan *req) {
+	defer conn.Close()
+	data := make([]byte, 10)
+	resp := make(chan bool)
+
+	for {
+		read, err := conn.Read(data)
+		if read != 0 {
+			reqs <- &req{
+				data: data,
+				resp: resp,
+			}
+			if <-resp == false {
+				break
+			}
+			_, err := conn.Write([]byte("ok\n"))
+			if err != nil {
+				log.Println("failed to write client")
+				break
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Println("failed to read client")
+			}
+			break
+		}
+	}
+}
+
 func main() {
-	xlog, err := newXlog("")
+	lgr, err := newLogger("/tmp/test.xlog")
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = xlog.log([]byte("Hi, there!\n"))
+
+	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = xlog.log([]byte("Hi. What's up\n"))
-	if err != nil {
-		log.Fatal(err)
+
+	go lgr.run()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		go handleClient(conn, lgr.reqs)
 	}
-	fmt.Println("Ok")
 }
