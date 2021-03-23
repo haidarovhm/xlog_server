@@ -47,7 +47,7 @@ func (lgr *logger) run() {
 	for req := range lgr.in {
 		err := lgr.log(req.data)
 		if err != nil {
-			log.Println("failed to write block")
+			log.Println(err)
 		}
 		req.out <- err == nil
 	}
@@ -55,9 +55,10 @@ func (lgr *logger) run() {
 }
 
 type acceptor struct {
-	ln net.Listener
-	q  chan *req
-	wg sync.WaitGroup
+	ln     net.Listener
+	q      chan *req
+	wg     sync.WaitGroup
+	nextId uint
 }
 
 func newAcceptor(addr string, q chan *req) (*acceptor, error) {
@@ -98,56 +99,64 @@ func (acc *acceptor) run() {
 			log.Println(err)
 			continue
 		}
-		log.Println("accepted")
+
+		id := acc.nextId
+		acc.nextId++
+		if *verbose {
+			log.Printf("%d accepted\n", id)
+		}
 		acc.wg.Add(1)
-		go acc.handleClient(conn)
+		go acc.handleClient(conn, id)
 	}
 }
 
-func (acc *acceptor) handleClient(conn net.Conn) {
+func (acc *acceptor) handleClient(conn net.Conn, id uint) {
 	defer acc.wg.Done()
 	defer conn.Close()
 
 	writer := bufio.NewWriter(conn)
-	data := make([]byte, 10)
+	data := make([]byte, *blockSize)
 	resp := make(chan bool)
 
 	for {
-		read, err := conn.Read(data)
-		if read != 0 {
-			acc.q <- &req{
-				data: data,
-				out:  resp,
-			}
-			if <-resp == false {
-				break
-			}
-			err := writer.WriteByte(byte(1))
-			if err == nil {
-				err = writer.Flush()
-			}
-			if err != nil {
-				log.Println("failed to write client")
-				break
-			}
-		}
+		_, err := io.ReadFull(conn, data)
 		if err != nil {
 			if err != io.EOF {
-				log.Println("failed to read client")
-			} else {
-				log.Println("conn is closed")
+				log.Printf("%d block reading failed, closing\n", id)
+			} else if *verbose {
+				log.Printf("%d closed\n", id)
 			}
+			break
+		}
+
+		acc.q <- &req{
+			data: data,
+			out:  resp,
+		}
+		if <-resp == false {
+			log.Printf("%d block writing failed, closing\n", id)
+			break
+		}
+
+		err = writer.WriteByte(byte(1))
+		if err == nil {
+			err = writer.Flush()
+		}
+		if err != nil {
+			log.Println("%d block acking failed, closing\n", id)
 			break
 		}
 	}
 }
 
-var trace *bool
+var verbose *bool
 var logfile *string
+var blockSize *uint
 
 func main() {
-	trace = flag.Bool("v", false, "enable tracing")
+	verbose = flag.Bool("v", false, "verbose logging")
 	logfile = flag.String("f", "test.xlog", "path to xlog")
+	blockSize = flag.Uint("b", 4096, "block size")
 	flag.Parse()
 
 	addr := ":8080"
