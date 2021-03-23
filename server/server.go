@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"example.com/test/utils"
 	"flag"
 	"io"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 )
+
+const ioTimeoutSec = 90
 
 type req struct {
 	data []byte
@@ -119,6 +122,7 @@ func (acc *acceptor) handleClient(conn net.Conn, id uint) {
 	resp := make(chan bool)
 
 	for {
+		utils.SetConnTimeout(conn, ioTimeoutSec)
 		_, err := io.ReadFull(conn, data)
 		if err != nil {
 			if err != io.EOF {
@@ -138,12 +142,13 @@ func (acc *acceptor) handleClient(conn net.Conn, id uint) {
 			break
 		}
 
+		utils.SetConnTimeout(conn, ioTimeoutSec)
 		err = writer.WriteByte(byte(1))
 		if err == nil {
 			err = writer.Flush()
 		}
 		if err != nil {
-			log.Println("%d block acking failed, closing\n", id)
+			log.Printf("%d block acking failed, closing\n", id)
 			break
 		}
 	}
