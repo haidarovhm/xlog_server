@@ -58,6 +58,10 @@ func main() {
 	blockSize = flag.Uint("b", 4096, "block size")
 	flag.Parse()
 
+	if *blocksNum == 0 || *blockSize == 0 {
+		log.Fatal("bad args")
+	}
+
 	addr := ":8080"
 	if flag.NArg() != 0 {
 		addr = flag.Args()[0]
