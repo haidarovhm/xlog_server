@@ -155,6 +155,7 @@ func (acc *acceptor) handleClient(conn net.Conn, id uint) {
 				log.Printf("%d closed\n", id)
 			}
 			cont = false
+		// TODO: fix timer recreation for idle connections
 		case <-time.After(time.Duration(100) * time.Millisecond):
 		}
 		if len(syncBlocks) == 0 {
@@ -191,6 +192,10 @@ func main() {
 	blockSize = flag.Uint("b", 4096, "block size")
 	syncSize = flag.Uint("n", 250, "blocks num per sync")
 	flag.Parse()
+
+	if *blockSize == 0 || *syncSize == 0 {
+		log.Fatal("bad args")
+	}
 
 	addr := ":8080"
 	if flag.NArg() != 0 {
