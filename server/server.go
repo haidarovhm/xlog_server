@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"example.com/test/utils"
 	"flag"
 	"io"
@@ -11,13 +10,14 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const ioTimeoutSec = 90
 
 type req struct {
-	data []byte
-	out  chan bool
+	data   [][]byte
+	status chan error
 }
 
 type logger struct {
@@ -38,40 +38,39 @@ func newLogger(path string) (*logger, error) {
 	}, nil
 }
 
-func (lgr *logger) log(data []byte) error {
-	_, err := lgr.file.Write(data)
-	if err == nil {
-		err = lgr.file.Sync()
-	}
-	return err
-}
-
 func (lgr *logger) run() {
 	for req := range lgr.in {
-		err := lgr.log(req.data)
-		if err != nil {
-			log.Println(err)
+		var err error
+		for i := range req.data {
+			_, err = lgr.file.Write(req.data[i])
+			if err != nil {
+				log.Println(err)
+				break
+			}
 		}
-		req.out <- err == nil
+		if err == nil {
+			err = lgr.file.Sync()
+		}
+		req.status <- err
 	}
 	lgr.done <- true
 }
 
 type acceptor struct {
 	ln     net.Listener
-	q      chan *req
+	syncQ  chan *req
 	wg     sync.WaitGroup
 	nextId uint
 }
 
-func newAcceptor(addr string, q chan *req) (*acceptor, error) {
+func newAcceptor(addr string, syncQ chan *req) (*acceptor, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	return &acceptor{
-		ln: ln,
-		q:  q,
+		ln:    ln,
+		syncQ: syncQ,
 	}, nil
 }
 
@@ -90,7 +89,7 @@ func (acc *acceptor) run() {
 		quit = true
 		acc.ln.Close()
 		acc.wg.Wait()
-		close(acc.q)
+		close(acc.syncQ)
 	}()
 
 	for {
@@ -113,55 +112,84 @@ func (acc *acceptor) run() {
 	}
 }
 
+func runReader(conn net.Conn, blocks chan []byte, status chan error) {
+	for {
+		data := make([]byte, *blockSize)
+		utils.SetConnTimeout(conn, ioTimeoutSec)
+		_, err := io.ReadFull(conn, data)
+		if err != nil {
+			status <- err
+			break
+		}
+		blocks <- data
+	}
+}
+
 func (acc *acceptor) handleClient(conn net.Conn, id uint) {
 	defer acc.wg.Done()
 	defer conn.Close()
 
-	writer := bufio.NewWriter(conn)
-	data := make([]byte, *blockSize)
-	resp := make(chan bool)
+	resp := make([]byte, int(*syncSize))
+	for i := range resp {
+		resp[i] = byte(1)
+	}
+	syncBlocks := make([][]byte, 0, len(resp))
+	inBlocks := make(chan []byte)
+	inEOF := make(chan error)
+	syncStat := make(chan error)
 
-	for {
-		utils.SetConnTimeout(conn, ioTimeoutSec)
-		_, err := io.ReadFull(conn, data)
-		if err != nil {
+	go runReader(conn, inBlocks, inEOF)
+	for cont := true; cont; {
+		select {
+		case block := <-inBlocks:
+			syncBlocks = append(syncBlocks, block)
+			if len(syncBlocks) < cap(syncBlocks) {
+				continue
+			}
+		case err := <-inEOF:
 			if err != io.EOF {
-				log.Printf("%d block reading failed, closing\n", id)
-			} else if *verbose {
+				log.Printf("%d blocks reading failed, closing\n", id)
+				return
+			}
+			if *verbose {
 				log.Printf("%d closed\n", id)
 			}
-			break
+			cont = false
+		case <-time.After(time.Duration(100) * time.Millisecond):
+		}
+		if len(syncBlocks) == 0 {
+			continue
 		}
 
-		acc.q <- &req{
-			data: data,
-			out:  resp,
+		acc.syncQ <- &req{
+			data:   syncBlocks,
+			status: syncStat,
 		}
-		if <-resp == false {
-			log.Printf("%d block writing failed, closing\n", id)
-			break
+		if <-syncStat != nil {
+			log.Printf("%d blocks writing failed, closing\n", id)
+			return
 		}
 
 		utils.SetConnTimeout(conn, ioTimeoutSec)
-		err = writer.WriteByte(byte(1))
-		if err == nil {
-			err = writer.Flush()
-		}
+		_, err := conn.Write(resp[0:len(syncBlocks)])
 		if err != nil {
-			log.Printf("%d block acking failed, closing\n", id)
-			break
+			log.Printf("%d blocks acking failed, closing\n", id)
+			return
 		}
+		syncBlocks = syncBlocks[:0]
 	}
 }
 
 var verbose *bool
 var logfile *string
 var blockSize *uint
+var syncSize *uint
 
 func main() {
 	verbose = flag.Bool("v", false, "verbose logging")
 	logfile = flag.String("f", "test.xlog", "path to xlog")
 	blockSize = flag.Uint("b", 4096, "block size")
+	syncSize = flag.Uint("n", 250, "blocks num per sync")
 	flag.Parse()
 
 	addr := ":8080"
