@@ -38,12 +38,16 @@ func newLogger(path string) (*logger, error) {
 	}, nil
 }
 
+func (lgr *logger) log(data []byte) error {
+	_, err := lgr.file.Write(data)
+	return err
+}
+
 func (lgr *logger) run() {
 	for req := range lgr.in {
 		var err error
 		for i := range req.data {
-			_, err = lgr.file.Write(req.data[i])
-			if err != nil {
+			if err = lgr.log(req.data[i]); err != nil {
 				log.Println(err)
 				break
 			}
